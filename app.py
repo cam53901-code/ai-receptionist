@@ -181,7 +181,7 @@ def send_sms_notification(message_body):
 
 # ─── TWILIO WEBHOOKS ─────────────────────────────────────
 
-@app.route("/voice", methods=["POST"])
+@app.route("/voice", methods=["GET", "POST"])
 def voice():
     """Called by Twilio when someone dials the number."""
     call_sid = request.form.get("CallSid", "unknown")
