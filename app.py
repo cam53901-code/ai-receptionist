@@ -1,6 +1,6 @@
 """
-CAWDA Creative — Minimal AI Receptionist
-Gets contact form info, says goodbye, sends email. Nothing more.
+CAWDA Creative — AI Receptionist (Deterministic)
+Counts 6 questions, then ends the call. No AI signal needed.
 """
 
 import os, json, smtplib
@@ -19,10 +19,9 @@ GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 YOUR_EMAIL = os.environ["YOUR_EMAIL"]
 YOUR_SMS_GATEWAY = os.environ.get("YOUR_SMS_GATEWAY", "")
 
-SYSTEM_PROMPT = """You are Alex at CAWDA Creative (cawdacreates.com). Collect these 6 answers one at a time, then end the call.
+SYSTEM_PROMPT = """You are Alex at CAWDA Creative. Collect these 6 answers, one at a time. One sentence per response.
 
-Ask in order. One question at a time. Nothing else.
-
+Questions in order:
 1. "What service are you looking for?"
 2. "What's your name?"
 3. "What's your email address?"
@@ -30,20 +29,31 @@ Ask in order. One question at a time. Nothing else.
 5. "What's your approximate budget?"
 6. "Briefly describe your project."
 
-When you have ALL six: say exactly "That's everything I need. Cameron will send your custom quote within 24 hours. Thanks for calling CAWDA Creative." Then the word GOODBYE_NOW on its own.
+After question 6, the call will end automatically. On the 6th response, simply acknowledge what they said. Keep it to one sentence. Do NOT say GOODBYE_NOW or anything about ending the call — the system handles that.
 
 RULES:
-- ONE sentence. Always.
-- Never explain services unless directly asked. If asked: "Websites, branding, and e-commerce."
-- If asked about pricing: "Cameron does custom quotes — you'll get yours within 24 hours."
+- ONE sentence. No exceptions.
+- Never explain services unless directly asked. Say: "Websites, branding, and e-commerce."
+- If asked about pricing: "Cameron does custom quotes."
 - If they go off topic: return to the next question.
-- NEVER repeat yourself.
-- NEVER introduce yourself after the first turn.
-- Keep responses under 120 characters."""
+- Never introduce yourself after the first turn.
+- Keep every response under 150 characters."""
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
 conversations = {}
+question_counts = {}
+
+QUESTIONS = [
+    "What service are you looking for?",
+    "What's your name?",
+    "What's your email address?",
+    "What's your phone number?",
+    "What's your approximate budget?",
+    "Briefly describe your project.",
+]
+
+CLOSING = "That's everything. Cameron will send your custom quote within 24 hours. Thanks for calling CAWDA Creative."
 
 
 def get_ai_response(call_sid, user_text):
@@ -52,8 +62,32 @@ def get_ai_response(call_sid, user_text):
             {"role": "user", "parts": [SYSTEM_PROMPT]},
             {"role": "model", "parts": ["Got it."]}
         ]
+        question_counts[call_sid] = 0
 
-    # Only send last 6 messages for speed
+    q_num = question_counts[call_sid]
+
+    # On the last question (6th), ask AI to just acknowledge, then we end
+    if q_num >= 6:
+        prompt = [
+            {"role": "user", "parts": [SYSTEM_PROMPT]},
+            {"role": "model", "parts": ["Got it."]},
+            {"role": "user", "parts": [
+                "This is the final answer. Acknowledge what they said in one sentence. "
+                "Do NOT ask another question. Do NOT say GOODBYE_NOW. "
+                f"Caller said: {user_text}"
+            ]},
+        ]
+        try:
+            response = model.generate_content(prompt)
+            reply = response.text.strip()
+        except:
+            reply = "Got it. Thanks for those details."
+        # Truncate safely
+        if len(reply) > 250:
+            reply = reply[:250].rsplit(" ", 1)[0]
+        return reply, True  # True = end call
+
+    # Normal question flow
     history = conversations[call_sid]
     if len(history) > 8:
         history = history[:2] + history[-6:]
@@ -63,17 +97,16 @@ def get_ai_response(call_sid, user_text):
     try:
         response = model.generate_content(history)
         reply = response.text.strip()
-    except Exception as e:
-        print(f"Gemini error: {e}")
-        reply = "Could you repeat that?"
+    except:
+        reply = QUESTIONS[q_num] if q_num < 6 else "Got it."
 
-    # Simple hard cap — no aggressive sentence splitting
     if len(reply) > 250:
         reply = reply[:250].rsplit(" ", 1)[0]
 
+    question_counts[call_sid] = q_num + 1
     conversations[call_sid] = history
     conversations[call_sid].append({"role": "model", "parts": [reply]})
-    return reply
+    return reply, False
 
 
 def generate_call_summary(call_sid):
@@ -120,6 +153,7 @@ def voice():
             {"role": "user", "parts": [SYSTEM_PROMPT]},
             {"role": "model", "parts": ["Got it."]}
         ]
+        question_counts[sid] = 0
         resp = VoiceResponse()
         resp.say("CAWDA Creative, this is Alex. What service are you looking for?",
                  voice="Polly.Joanna")
@@ -140,7 +174,7 @@ def handle_speech():
     text = request.form.get("SpeechResult", "").strip()
     conf = float(request.form.get("Confidence", "0"))
 
-    print(f"[{sid[:10]}] '{text[:80]}...' (conf={conf})")
+    print(f"[{sid[:10]}] '{text[:80]}' (conf={conf})")
 
     if not text or conf < 0.3:
         resp = VoiceResponse()
@@ -151,15 +185,12 @@ def handle_speech():
         resp.redirect("/voice")
         return Response(str(resp), mimetype="text/xml")
 
-    reply = get_ai_response(sid, text)
-    print(f"[AI] {reply}")
-
-    # Check for GOODBYE_NOW BEFORE touching the response text
-    should_end = "GOODBYE_NOW" in reply
+    reply, should_end = get_ai_response(sid, text)
+    question_counts[sid] = question_counts.get(sid, 0)
+    print(f"[AI] Q#{question_counts[sid]} | {reply}")
 
     if should_end:
-        # Remove the signal word from spoken text
-        spoken = reply.replace("GOODBYE_NOW", "").strip().rstrip(",.;:")
+        # Question 6 answered — end the call
         summary = generate_call_summary(sid)
 
         subj = f"CAWDA Lead — {summary.get('caller_name', 'Unknown')} — {datetime.now().strftime('%b %d, %I:%M %p')}"
@@ -172,7 +203,7 @@ Service:  {summary.get('service_interest', '?')}
 Budget:   {summary.get('budget', '?')}
 Project:  {summary.get('project_description', '?')}
 
-Action:   {summary.get('action_needed', 'Send custom quote within 24 hours')}
+Action:   Send custom quote within 24 hours
 
 Key Points:
 {chr(10).join('- '+p for p in summary.get('key_points', ['none']))}
@@ -182,10 +213,13 @@ cawdacreates.com | hello@cawdacreates.com
         send_email(subj, body)
 
         resp = VoiceResponse()
-        if spoken:
-            resp.say(spoken, voice="Polly.Joanna")
+        resp.say(reply, voice="Polly.Joanna")
+        resp.pause(length=0.3)
+        resp.say(CLOSING, voice="Polly.Joanna")
         resp.hangup()
+
         conversations.pop(sid, None)
+        question_counts.pop(sid, None)
         return Response(str(resp), mimetype="text/xml")
 
     # Normal turn
