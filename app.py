@@ -1,9 +1,8 @@
 """
-CAWDA Creative — AI Receptionist (Deterministic)
-Counts 6 questions, then ends the call. No AI signal needed.
+CAWDA Creative — AI Receptionist (Timeout-Proof)
 """
 
-import os, json, smtplib
+import os, json, smtplib, signal
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
@@ -29,31 +28,52 @@ Questions in order:
 5. "What's your approximate budget?"
 6. "Briefly describe your project."
 
-After question 6, the call will end automatically. On the 6th response, simply acknowledge what they said. Keep it to one sentence. Do NOT say GOODBYE_NOW or anything about ending the call — the system handles that.
+After question 6, the call ends automatically. On the 6th response, simply acknowledge what they said in one sentence. Do not ask another question.
 
 RULES:
 - ONE sentence. No exceptions.
-- Never explain services unless directly asked. Say: "Websites, branding, and e-commerce."
+- Never explain services unless directly asked: "Websites, branding, and e-commerce."
 - If asked about pricing: "Cameron does custom quotes."
 - If they go off topic: return to the next question.
 - Never introduce yourself after the first turn.
-- Keep every response under 150 characters."""
+- Keep responses under 150 characters."""
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
 conversations = {}
 question_counts = {}
 
-QUESTIONS = [
-    "What service are you looking for?",
-    "What's your name?",
-    "What's your email address?",
-    "What's your phone number?",
-    "What's your approximate budget?",
-    "Briefly describe your project.",
-]
-
 CLOSING = "That's everything. Cameron will send your custom quote within 24 hours. Thanks for calling CAWDA Creative."
+
+
+class TimeoutError(Exception):
+    pass
+
+
+def with_timeout(func, args=(), kwargs=None, seconds=25):
+    """Run a function with a timeout. Returns (result, True) or (None, False)."""
+    if kwargs is None:
+        kwargs = {}
+    result = [None]
+    error = [None]
+
+    def target():
+        try:
+            result[0] = func(*args, **kwargs)
+        except Exception as e:
+            error[0] = e
+
+    import threading
+    t = threading.Thread(target=target)
+    t.daemon = True
+    t.start()
+    t.join(seconds)
+
+    if t.is_alive():
+        return None, False
+    if error[0]:
+        raise error[0]
+    return result[0], True
 
 
 def get_ai_response(call_sid, user_text):
@@ -66,28 +86,29 @@ def get_ai_response(call_sid, user_text):
 
     q_num = question_counts[call_sid]
 
-    # On the last question (6th), ask AI to just acknowledge, then we end
     if q_num >= 6:
         prompt = [
             {"role": "user", "parts": [SYSTEM_PROMPT]},
             {"role": "model", "parts": ["Got it."]},
             {"role": "user", "parts": [
-                "This is the final answer. Acknowledge what they said in one sentence. "
-                "Do NOT ask another question. Do NOT say GOODBYE_NOW. "
-                f"Caller said: {user_text}"
+                "Final answer. Acknowledge in one sentence. No questions. "
+                f"Caller: {user_text}"
             ]},
         ]
         try:
-            response = model.generate_content(prompt)
-            reply = response.text.strip()
-        except:
-            reply = "Got it. Thanks for those details."
-        # Truncate safely
+            response, ok = with_timeout(model.generate_content, (prompt,), seconds=25)
+            if ok:
+                reply = response.text.strip()
+            else:
+                reply = "Got it, thanks for those details."
+        except Exception as e:
+            print(f"Gemini error on q6: {e}")
+            reply = "Got it, thanks for those details."
+
         if len(reply) > 250:
             reply = reply[:250].rsplit(" ", 1)[0]
-        return reply, True  # True = end call
+        return reply, True
 
-    # Normal question flow
     history = conversations[call_sid]
     if len(history) > 8:
         history = history[:2] + history[-6:]
@@ -95,10 +116,14 @@ def get_ai_response(call_sid, user_text):
     history.append({"role": "user", "parts": [f"Caller: {user_text}"]})
 
     try:
-        response = model.generate_content(history)
-        reply = response.text.strip()
-    except:
-        reply = QUESTIONS[q_num] if q_num < 6 else "Got it."
+        response, ok = with_timeout(model.generate_content, (history,), seconds=20)
+        if ok:
+            reply = response.text.strip()
+        else:
+            reply = "Could you repeat that?"
+    except Exception as e:
+        print(f"Gemini error: {e}")
+        reply = "Could you repeat that?"
 
     if len(reply) > 250:
         reply = reply[:250].rsplit(" ", 1)[0]
@@ -118,24 +143,42 @@ def generate_call_summary(call_sid):
 Conversation:
 {json.dumps(conversations[call_sid], indent=2)}"""
     try:
-        raw = model.generate_content(prompt).text.strip()
-        for m in ["```json", "```"]:
-            raw = raw.replace(m, "")
-        return json.loads(raw.strip())
-    except:
-        return {"raw_summary": "Could not parse"}
+        response, ok = with_timeout(model.generate_content, (prompt,), seconds=20)
+        if ok:
+            raw = response.text.strip()
+            for m in ["```json", "```"]:
+                raw = raw.replace(m, "")
+            return json.loads(raw.strip())
+        else:
+            return {"raw_summary": "Timed out"}
+    except Exception as e:
+        print(f"Summary error: {e}")
+        # Fallback: extract what we can from raw conversation
+        msgs = conversations[call_sid]
+        return {
+            "caller_name": "Unknown",
+            "caller_phone": "Unknown",
+            "caller_email": "Unknown",
+            "service_interest": "Unknown",
+            "budget": "Unknown",
+            "project_description": str(msgs[-2].get("parts", ["Unknown"])[0]) if len(msgs) >= 2 else "Unknown",
+            "key_points": [],
+            "action_needed": "Send custom quote within 24 hours",
+            "raw_summary": "Fallback — AI summary timed out"
+        }
 
 
 def send_email(subject, body):
+    """Send email with SMTP timeout — never hang the worker."""
     try:
+        s = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
+        s.starttls()
+        s.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
         msg = MIMEMultipart()
         msg["From"] = GMAIL_ADDRESS
         msg["To"] = YOUR_EMAIL
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "plain"))
-        s = smtplib.SMTP("smtp.gmail.com", 587)
-        s.starttls()
-        s.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
         s.send_message(msg)
         s.quit()
         print("Email OK")
@@ -174,7 +217,7 @@ def handle_speech():
     text = request.form.get("SpeechResult", "").strip()
     conf = float(request.form.get("Confidence", "0"))
 
-    print(f"[{sid[:10]}] '{text[:80]}' (conf={conf})")
+    print(f"[{sid[:10]}] '{text[:80]}...' (conf={conf})")
 
     if not text or conf < 0.3:
         resp = VoiceResponse()
@@ -186,11 +229,11 @@ def handle_speech():
         return Response(str(resp), mimetype="text/xml")
 
     reply, should_end = get_ai_response(sid, text)
-    question_counts[sid] = question_counts.get(sid, 0)
-    print(f"[AI] Q#{question_counts[sid]} | {reply}")
+    prefix = f"Q#{min(question_counts.get(sid, 0) + 1, 6)}"
+    print(f"[AI {prefix}] {reply} ({'END' if should_end else ''})")
 
     if should_end:
-        # Question 6 answered — end the call
+        # Generate summary with timeout protection
         summary = generate_call_summary(sid)
 
         subj = f"CAWDA Lead — {summary.get('caller_name', 'Unknown')} — {datetime.now().strftime('%b %d, %I:%M %p')}"
@@ -210,6 +253,7 @@ Key Points:
 ---
 cawdacreates.com | hello@cawdacreates.com
 """
+        # Send email with timeout — won't block hangup if it fails
         send_email(subj, body)
 
         resp = VoiceResponse()
@@ -222,7 +266,6 @@ cawdacreates.com | hello@cawdacreates.com
         question_counts.pop(sid, None)
         return Response(str(resp), mimetype="text/xml")
 
-    # Normal turn
     resp = VoiceResponse()
     resp.say(reply, voice="Polly.Joanna")
     gather = Gather(input="speech", action="/handle-speech",
