@@ -1,7 +1,6 @@
 """
-CAWDA Creative — AI Receptionist
-cawdacreates.com | Solo creative studio
-Efficient: collects contact form info, then ends the call.
+CAWDA Creative — Minimal AI Receptionist
+Gets contact form info, says goodbye, sends email. Nothing more.
 """
 
 import os, json, smtplib
@@ -20,67 +19,67 @@ GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 YOUR_EMAIL = os.environ["YOUR_EMAIL"]
 YOUR_SMS_GATEWAY = os.environ.get("YOUR_SMS_GATEWAY", "")
 
-SYSTEM_PROMPT = """You are Alex, receptionist for CAWDA Creative — a solo-run studio (cawdacreates.com) that builds custom websites, brands, and e-commerce stores. Clients work directly with Cameron, the founder. No middlemen, no agency bloat.
+SYSTEM_PROMPT = """You are Alex at CAWDA Creative (cawdacreates.com). Your ONLY job: collect these 6 pieces of info, one at a time, then end the call.
 
-Your ONLY job is to fill out the contact form. Ask questions in this exact order:
+Ask these questions in ORDER. Do NOT skip ahead. Do NOT ask anything else.
 
-1. "What service are you interested in?" Options: custom web design, web development, brand identity, e-commerce, landing page, maintenance and support, or something else.
-
+1. "What service are you looking for?"
 2. "What's your name?"
+3. "What's your email?"
+4. "What's your phone number?" (optional, skip if they prefer not to give it)
+5. "What's your budget?" (under $500, $500-1k, $1k-2k, $2k-3.5k, $3.5k-5k, $5k+)
+6. "Briefly, what's the project?"
 
-3. "What's your email address?"
+After you have all answers: say "That's everything. Cameron will send you a quote within 24 hours. Thanks for calling CAWDA Creative." Then ALWAYS end with the exact word: GOODBYE_NOW
 
-4. "What's your phone number?" (say it's optional)
-
-5. "What's your estimated budget?" Options: under 500, 500 to 1000, 1000 to 2000, 2000 to 3500, 3500 to 5000, or over 5000.
-
-6. "Tell me a bit about your project." Keep this brief — one or two sentences is plenty.
-
-Once you have ALL six answers, say: "That's everything I need. Cameron will review this and send you a personalized quote within 24 hours. You can also check out the portfolio at cawdacreates.com. Thanks for calling!"
-
-Then say: "GOODBYE_NOW"
-
-That exact phrase — GOODBYE_NOW — is your signal to end the call. Say it as a separate line when you are ready to hang up.
-
-CRITICAL RULES:
-- One question at a time. Never ask multiple questions in one response.
-- One or two short sentences per response, maximum.
-- If the caller asks a question instead of answering: answer it briefly, then return to your next question.
-- If the caller goes off topic: politely steer them back to the next question.
-- If you already have all the info: thank them and end with GOODBYE_NOW.
-- Do NOT introduce yourself again mid-call. Only on the very first turn.
-- Do NOT ramble. Do NOT list services unless specifically asked."""
+ABSOLUTE RULES:
+- ONE sentence per response. Always. Never two.
+- If they ask about pricing/services: "Cameron covers that in your custom quote."
+- If they ramble: gently move to the next question.
+- NEVER explain what CAWDA Creative does unless directly asked. If asked: "We build custom websites, brands, and e-commerce stores."
+- NEVER repeat yourself.
+- NEVER introduce yourself after the first question.
+- Each response must be under 150 characters."""
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
 conversations = {}
+turn_counts = {}
 
 
 def get_ai_response(call_sid, user_text):
     if call_sid not in conversations:
         conversations[call_sid] = [
             {"role": "user", "parts": [SYSTEM_PROMPT]},
-            {"role": "model", "parts": ["Understood. I'll work through the contact form questions one at a time and end with GOODBYE_NOW when done."]}
+            {"role": "model", "parts": ["Got it."]}
         ]
+        turn_counts[call_sid] = 0
 
-    conversations[call_sid].append({"role": "user", "parts": [f"Caller: {user_text}"]})
+    turn_counts[call_sid] += 1
+
+    # Only send last 8 messages to keep it fast
+    history = conversations[call_sid]
+    if len(history) > 10:
+        history = history[:2] + history[-8:]
+
+    history.append({"role": "user", "parts": [f"Caller: {user_text}"]})
 
     try:
-        response = model.generate_content(conversations[call_sid])
+        response = model.generate_content(history)
         reply = response.text.strip()
     except Exception as e:
         print(f"Gemini error: {e}")
-        reply = "Sorry, could you repeat that?"
+        reply = "Could you repeat that?"
 
-    # Hard guardrails
-    sentences = [s.strip() for s in reply.replace("? ", "?. ").replace("! ", "!. ").split(". ") if s.strip()]
-    if len(sentences) > 4:
-        reply = ". ".join(sentences[:4])
-        if not reply.endswith((".", "?", "!")):
-            reply += "."
-    if len(reply) > 400:
-        reply = reply[:397].rsplit(" ", 1)[0] + "."
+    # Aggressive truncation — prevent cut-off sentences
+    if len(reply) > 200:
+        # Cut at last complete sentence under 200 chars
+        cut = reply[:200].rsplit(". ", 1)[0]
+        cut = cut.rsplit("? ", 1)[0]
+        cut = cut.rsplit("! ", 1)[0]
+        reply = cut + "." if not cut.endswith((".", "?", "!")) else cut
 
+    conversations[call_sid] = history
     conversations[call_sid].append({"role": "model", "parts": [reply]})
     return reply
 
@@ -89,7 +88,7 @@ def generate_call_summary(call_sid):
     if call_sid not in conversations:
         return {"error": "No data"}
     prompt = f"""Extract JSON from this call. ONLY raw JSON, no backticks:
-{{"caller_name":null,"caller_company":null,"caller_phone":null,"caller_email":null,"service_interest":null,"budget":null,"project_description":null,"reason":"","key_points":[],"action_needed":null,"urgency":"low"}}
+{{"caller_name":null,"caller_phone":null,"caller_email":null,"service_interest":null,"budget":null,"project_description":null,"key_points":[],"action_needed":null}}
 
 Conversation:
 {json.dumps(conversations[call_sid], indent=2)}"""
@@ -98,9 +97,8 @@ Conversation:
         for m in ["```json", "```"]:
             raw = raw.replace(m, "")
         return json.loads(raw.strip())
-    except Exception as e:
-        print(f"Summary error: {e}")
-        return {"raw_summary": str(e)}
+    except:
+        return {"raw_summary": "Could not parse"}
 
 
 def send_email(subject, body):
@@ -120,50 +118,27 @@ def send_email(subject, body):
         print(f"Email fail: {e}")
 
 
-def send_sms(text):
-    if not YOUR_SMS_GATEWAY:
-        return
-    try:
-        msg = MIMEText(text[:160])
-        msg["From"] = GMAIL_ADDRESS
-        msg["To"] = YOUR_SMS_GATEWAY
-        msg["Subject"] = ""
-        s = smtplib.SMTP("smtp.gmail.com", 587)
-        s.starttls()
-        s.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        s.send_message(msg)
-        s.quit()
-        print("SMS OK")
-    except Exception as e:
-        print(f"SMS fail: {e}")
-
-
-# ─── ROUTES ──────────────────────────────────────────────
-
 @app.route("/voice", methods=["GET", "POST"])
 def voice():
-    """Initial greeting only. Called once at start, or on Gather timeout."""
     sid = request.form.get("CallSid", "unknown")
-    is_new = sid not in conversations or len(conversations.get(sid, [])) <= 2
+    is_new = sid not in conversations
 
     if is_new:
-        conversations[sid] = []
+        conversations[sid] = [
+            {"role": "user", "parts": [SYSTEM_PROMPT]},
+            {"role": "model", "parts": ["Got it."]}
+        ]
+        turn_counts[sid] = 0
         resp = VoiceResponse()
-        resp.say("CAWDA Creative, this is Alex. What service are you interested in?",
+        resp.say("CAWDA Creative, this is Alex. What service are you looking for?",
                  voice="Polly.Joanna")
     else:
-        # Timed out mid-conversation — prompt them to continue, don't re-greet
         resp = VoiceResponse()
-        resp.say("I'm still here. Go ahead.",
+        resp.say("Go ahead.",
                  voice="Polly.Joanna")
 
-    gather = Gather(
-        input="speech",
-        action="/handle-speech",
-        speech_timeout="5",
-        speech_model="default",
-        enhanced=True,
-    )
+    gather = Gather(input="speech", action="/handle-speech",
+                    speech_timeout="4", speech_model="default", enhanced=True)
     resp.append(gather)
     resp.redirect("/voice")
     return Response(str(resp), mimetype="text/xml")
@@ -175,73 +150,64 @@ def handle_speech():
     text = request.form.get("SpeechResult", "").strip()
     conf = float(request.form.get("Confidence", "0"))
 
-    print(f"[CALL {sid[:12]}...] '{text}' (conf={conf})")
+    print(f"[{sid[:10]}] '{text}' (conf={conf})")
 
     if not text or conf < 0.3:
         resp = VoiceResponse()
-        resp.say("Sorry, I missed that. Could you say it again?", voice="Polly.Joanna")
+        resp.say("Sorry, say that again?", voice="Polly.Joanna")
         gather = Gather(input="speech", action="/handle-speech",
-                        speech_timeout="5", speech_model="default", enhanced=True)
+                        speech_timeout="4", speech_model="default", enhanced=True)
         resp.append(gather)
         resp.redirect("/voice")
         return Response(str(resp), mimetype="text/xml")
 
-    # ── AI response ──
     reply = get_ai_response(sid, text)
-    print(f"[AI REPLY] {reply}")
+    print(f"[AI] {reply}")
 
-    # ── Check if AI signaled to end the call ──
     if "GOODBYE_NOW" in reply:
-        # Remove the signal phrase from what we speak
         spoken = reply.replace("GOODBYE_NOW", "").strip()
         summary = generate_call_summary(sid)
 
-        subj = f"CAWDA — {summary.get('caller_name', 'Caller')} — {datetime.now().strftime('%b %d, %I:%M %p')}"
-        body = f"""📞 NEW LEAD FROM AI RECEPTIONIST
-{'='*40}
-Name:       {summary.get('caller_name', 'Unknown')}
-Company:    {summary.get('caller_company', 'N/A')}
-Phone:      {summary.get('caller_phone', 'N/A')}
-Email:      {summary.get('caller_email', 'N/A')}
-Service:    {summary.get('service_interest', 'Not specified')}
-Budget:     {summary.get('budget', 'Not discussed')}
-Project:    {summary.get('project_description', 'N/A')}
-Urgency:    {summary.get('urgency', 'low')}
+        subj = f"CAWDA Lead — {summary.get('caller_name', 'Unknown')} — {datetime.now().strftime('%b %d, %I:%M %p')}"
+        body = f"""NEW LEAD
+=========
+Name:     {summary.get('caller_name', '?')}
+Phone:    {summary.get('caller_phone', '?')}
+Email:    {summary.get('caller_email', '?')}
+Service:  {summary.get('service_interest', '?')}
+Budget:   {summary.get('budget', '?')}
+Project:  {summary.get('project_description', '?')}
 
-Reason:     {summary.get('reason', 'N/A')}
-Action:     {summary.get('action_needed', 'None')}
+Action:   {summary.get('action_needed', 'Send quote within 24hrs')}
 
 Points:
-{chr(10).join('- '+p for p in summary.get('key_points', ['None']))}
-
+{chr(10).join('- '+p for p in summary.get('key_points', ['none']))}
 ---
-CAWDA Creative · cawdacreates.com · hello@cawdacreates.com
+cawdacreates.com | hello@cawdacreates.com
 """
         send_email(subj, body)
-        send_sms(f"CAWDA lead: {summary.get('caller_name','?')} — {summary.get('service_interest', summary.get('reason','call'))}"[:160])
 
         resp = VoiceResponse()
         if spoken:
             resp.say(spoken, voice="Polly.Joanna")
-        resp.pause(length=0.3)
         resp.hangup()
         conversations.pop(sid, None)
+        turn_counts.pop(sid, None)
         return Response(str(resp), mimetype="text/xml")
 
-    # ── Normal conversation: speak reply, gather next input ──
     resp = VoiceResponse()
-    resp.pause(length=0.4)
+    # No pause — respond immediately
     resp.say(reply, voice="Polly.Joanna")
     gather = Gather(input="speech", action="/handle-speech",
-                    speech_timeout="5", speech_model="default", enhanced=True)
+                    speech_timeout="4", speech_model="default", enhanced=True)
     resp.append(gather)
-    resp.redirect("/voice")  # safe now — /voice won't re-greet if conversation exists
+    resp.redirect("/voice")
     return Response(str(resp), mimetype="text/xml")
 
 
 @app.route("/status")
 def status():
-    return {"ok": True, "calls": len(conversations)}
+    return {"ok": True}
 
 
 if __name__ == "__main__":
