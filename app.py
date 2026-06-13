@@ -1,24 +1,23 @@
 """
-CAWDA Creative — AI Receptionist (fixed)
-Deterministically collects lead details and emails them after the final answer.
+CAWDA Creative — AI Receptionist
+Deterministically collects lead details and sends email via SendGrid Web API.
+This avoids SMTP port blocks on Render free services.
 """
 
 import os
 import json
-import smtplib
 import threading
 import traceback
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
+import requests
 from flask import Flask, request, Response
 from twilio.twiml.voice_response import VoiceResponse, Gather
 
 app = Flask(__name__)
 
-GMAIL_ADDRESS = os.environ["GMAIL_ADDRESS"]
-GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
+SENDGRID_API_KEY = os.environ["SENDGRID_API_KEY"]
+FROM_EMAIL = os.environ.get("FROM_EMAIL", "hello@cawdacreates.com")
 YOUR_EMAIL = os.environ["YOUR_EMAIL"]
 
 VOICE = "Polly.Joanna"
@@ -89,16 +88,37 @@ Action: Send custom quote within 24 hours
 cawdacreates.com | hello@cawdacreates.com
 """
 
-    msg = MIMEMultipart()
-    msg["From"] = GMAIL_ADDRESS
-    msg["To"] = YOUR_EMAIL
-    msg["Subject"] = subj
-    msg.attach(MIMEText(body, "plain"))
+    payload = {
+        "personalizations": [
+            {
+                "to": [{"email": YOUR_EMAIL}],
+                "subject": subj,
+            }
+        ],
+        "from": {
+            "email": FROM_EMAIL,
+            "name": "CAWDA AI Receptionist",
+        },
+        "content": [
+            {
+                "type": "text/plain",
+                "value": body,
+            }
+        ],
+    }
 
-    with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as s:
-        s.starttls()
-        s.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-        s.send_message(msg)
+    response = requests.post(
+        "https://api.sendgrid.com/v3/mail/send",
+        headers={
+            "Authorization": f"Bearer {SENDGRID_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=20,
+    )
+
+    if response.status_code not in (200, 202):
+        raise RuntimeError(f"SendGrid failed: {response.status_code} {response.text}")
 
 
 def process_summary_and_email(sid):
@@ -123,7 +143,7 @@ def process_summary_and_email(sid):
             "transcript": state.get("transcript", []),
         }
 
-        # Backup first so the lead is not lost if Gmail fails.
+        # Backup first so the lead is not lost if email fails.
         try:
             with open("/tmp/cawda_lead_backup.jsonl", "a") as f:
                 f.write(json.dumps(summary) + "\n")
