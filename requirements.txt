@@ -3,3 +3,4 @@ twilio
 google-generativeai
 gunicorn
 pytz
+requests
