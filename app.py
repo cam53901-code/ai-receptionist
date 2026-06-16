@@ -1,7 +1,7 @@
 """
 CAWDA Creative — AI Receptionist
 Deterministically collects lead details and sends email via SendGrid Web API.
-This avoids SMTP port blocks on Render free services.
+Humanized voice update: neural voice + more natural prompts + acknowledgements.
 """
 
 import os
@@ -20,16 +20,29 @@ SENDGRID_API_KEY = os.environ["SENDGRID_API_KEY"]
 FROM_EMAIL = os.environ.get("FROM_EMAIL", "hello@cawdacreates.com")
 YOUR_EMAIL = os.environ["YOUR_EMAIL"]
 
-VOICE = "Polly.Joanna"
+# More natural Twilio TTS voice. If your Twilio account does not support this voice,
+# change this to "Polly.Joanna" or set TWILIO_VOICE in Render.
+VOICE = os.environ.get("TWILIO_VOICE", "Polly.Joanna-Neural")
+
 CLOSING = "That's everything. Cameron will send your custom quote within 24 hours. Thanks for calling CAWDA Creative."
 
+# The fields are still collected in a fixed order so the lead email is reliable,
+# but the wording is more conversational.
 QUESTIONS = [
-    ("service_interest", "What service are you looking for?"),
-    ("caller_name", "What's your name?"),
-    ("caller_email", "What's your email address?"),
-    ("caller_phone", "What's your phone number? You can say skip if you prefer."),
-    ("budget", "What's your approximate budget?"),
-    ("project_description", "Briefly describe your project."),
+    ("service_interest", "What can we help you with today?"),
+    ("caller_name", "Who do I have the pleasure of speaking with?"),
+    ("caller_email", "What's the best email for Cameron to reach you at?"),
+    ("caller_phone", "What's the best phone number for you? You can skip this if you'd rather not share it."),
+    ("budget", "Do you have a rough budget in mind for the project?"),
+    ("project_description", "Could you tell me a little bit about the project and what you're hoping to build?"),
+]
+
+ACKNOWLEDGEMENTS = [
+    "Got it.",
+    "Perfect.",
+    "Thanks.",
+    "That helps.",
+    "Sounds good.",
 ]
 
 # In-memory per-call state. This is OK for a single Render worker.
@@ -62,6 +75,19 @@ def normalize_answer(key, text):
     if key == "caller_phone" and text.lower() in {"skip", "no", "none", "no thanks", "rather not"}:
         return "Skipped"
     return text
+
+
+def get_acknowledgement(idx, state):
+    """Return a short human-style acknowledgement before the next question."""
+    # After the caller gives their name, make the next transition slightly warmer.
+    if idx == 1:
+        name = state.get("answers", {}).get("caller_name", "").strip()
+        if name:
+            # Keep the spoken name simple. Twilio transcribes full phrases like
+            # "My name is Cameron Miller", so avoid over-processing it.
+            return "Thanks."
+
+    return ACKNOWLEDGEMENTS[idx % len(ACKNOWLEDGEMENTS)]
 
 
 def send_email(summary):
@@ -243,10 +269,11 @@ def handle_speech():
 
         return Response(str(resp), mimetype="text/xml")
 
-    # Move to next required question.
+    # Move to next required question with a short natural acknowledgement.
     state["question_index"] = idx + 1
+    ack = get_acknowledgement(idx, state)
     next_question = QUESTIONS[idx + 1][1]
-    return say_and_gather(next_question)
+    return say_and_gather(f"{ack} {next_question}")
 
 
 @app.route("/status")
