@@ -51,8 +51,8 @@ CLOSING = "That's everything. Cameron will send your custom quote within 24 hour
 # The fields are still collected in a fixed order so the lead email is reliable,
 # but the wording is more conversational.
 QUESTIONS = [
-    ("service_interest", "What can we help you with today?"),
-    ("caller_name", "Who do I have the pleasure of speaking with?"),
+    ("service_interest", "What are we looking to get done today?"),
+    ("caller_name", "And who do I have the pleasure of speaking with?"),
     ("caller_email", "What's the best email for Cameron to reach you at?"),
     ("caller_phone", "What's the best phone number for you? You can skip this if you'd rather not share it."),
     ("budget", "Do you have a rough budget in mind for the project?"),
@@ -63,7 +63,7 @@ ACKNOWLEDGEMENTS = [
     "Got it.",
     "Perfect.",
     "Thanks.",
-    "That helps.",
+    "Awesome.",
     "Sounds good.",
 ]
 
