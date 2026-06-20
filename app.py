@@ -54,7 +54,7 @@ QUESTIONS = [
     ("service_interest", "So? What are we looking to get done today?"),
     ("caller_name", "And who do I have the pleasure of speaking with?"),
     ("caller_email", "Now. What's the best email for Cameron to reach you at?"),
-    ("caller_phone", "What's the best phone number for you?
+    ("caller_phone", "What's the best phone number for you?"),
     ("budget", "Do you happen to have a rough budget in mind for the project?"),
     ("project_description", "And before we wrap things up, could you tell me a little bit about what you're hoping to build?"),
 ]
