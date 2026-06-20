@@ -46,24 +46,26 @@ PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
 AUDIO_DIR = Path("/tmp/cawda_tts_audio")
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
-CLOSING = "Alright, and that, is everything. Cameron will send your custom quote within 24 hours. Thank you for calling CAWDA Creative."
+CLOSING = "That's everything I need. Cameron will review this and follow up within 24 hours. Thanks for calling CAWDA Creative."
 
-# The fields are still collected in a fixed order so the lead email is reliable,
-# but the wording is more conversational.
+# The fields are collected in a fixed order so the lead email is reliable,
+# but the wording is more conversational and avoids redundant questions.
+# The first question now collects both the reason for the call and basic project details.
 QUESTIONS = [
-    ("service_interest", "So? What are we looking to get done today?"),
-    ("caller_name", "And who do I have the pleasure of speaking with?"),
-    ("caller_email", "Now. What's the best email for Cameron to reach you at?"),
-    ("caller_phone", "What's the best phone number for you?"),
-    ("budget", "Do you happen to have a rough budget in mind for the project?"),
-    ("project_description", "And before we wrap things up, could you tell me a little bit about what you're hoping to build?"),
+    (
+        "service_interest",
+        "What are we looking to get done today? Feel free to include a few details so Cameron has some context.",
+    ),
+    ("caller_name", "Who do I have the pleasure of speaking with?"),
+    ("caller_email", "What's the best email for Cameron to reach you at?"),
+    ("caller_phone", "What's the best phone number for you? You can skip this if you'd rather not share it."),
 ]
 
 ACKNOWLEDGEMENTS = [
     "Got it.",
     "Perfect.",
     "Thanks.",
-    "Awesome.",
+    "That helps.",
     "Sounds good.",
 ]
 
@@ -202,9 +204,7 @@ def send_email(summary):
 Name: {summary.get('caller_name', '?')}
 Phone: {summary.get('caller_phone', '?')}
 Email: {summary.get('caller_email', '?')}
-Service: {summary.get('service_interest', '?')}
-Budget: {summary.get('budget', '?')}
-Project: {summary.get('project_description', '?')}
+Request / Details: {summary.get('service_interest', '?')}
 
 Twilio From: {summary.get('twilio_from', '?')}
 Call SID: {summary.get('call_sid', '?')}
@@ -265,8 +265,6 @@ def process_summary_and_email(sid):
             "caller_phone": answers.get("caller_phone") or state.get("twilio_from") or "Unknown",
             "caller_email": answers.get("caller_email") or "Unknown",
             "service_interest": answers.get("service_interest") or "Unknown",
-            "budget": answers.get("budget") or "Unknown",
-            "project_description": answers.get("project_description") or "Unknown",
             "twilio_from": state.get("twilio_from"),
             "call_sid": sid,
             "timestamp": str(datetime.now()),
@@ -312,7 +310,7 @@ def voice():
         "started_at": str(datetime.now()),
     }
 
-    return say_and_gather("Hey! CAWDA Creative, this is Alex. " + QUESTIONS[0][1])
+    return say_and_gather("CAWDA Creative, this is Alex. " + QUESTIONS[0][1])
 
 
 @app.route("/repeat-question", methods=["GET", "POST"])
